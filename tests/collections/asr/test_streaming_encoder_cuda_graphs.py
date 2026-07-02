@@ -149,6 +149,22 @@ class TestStreamingEncoderCudaGraphsGPU:
             encoder.set_streaming_cuda_graphs(enabled=False)
 
     @pytest.mark.unit
+    def test_autocast_runs_eager(self):
+        """Under an active autocast context the graph path must be skipped: a graph captured
+        under one autocast state would replay it regardless of the caller's state, which could
+        silently return outputs for the wrong precision."""
+        device = "cuda"
+        encoder = make_encoder(device)
+        helper = encoder.set_streaming_cuda_graphs(enabled=True, warmup_steps=1)
+        try:
+            chunks = steady_chunks(encoder, 2, num_steps=4, device=device)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                run_stream(encoder, chunks, 2, device, keep_all_last=False)
+            assert len(helper._graphs) == 0, "graph captured/used under autocast"
+        finally:
+            encoder.set_streaming_cuda_graphs(enabled=False)
+
+    @pytest.mark.unit
     def test_forced_no_graphs_mode(self):
         """Forced no_graphs mode must never capture, and results must match eager."""
         device = "cuda"

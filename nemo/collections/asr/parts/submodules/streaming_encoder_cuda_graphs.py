@@ -149,7 +149,13 @@ class CudaGraphsStreamingEncoderStep(WithOptionalCudaGraphs):
         )
 
     def _can_use_graphs(self, signal, cache_last_channel, keep_all_outputs, bypass_pre_encode) -> bool:
-        """Static-shape, inference-only, cached streaming steps qualify for capture/replay."""
+        """Static-shape, inference-only, cached streaming steps qualify for capture/replay.
+
+        Autocast is intentionally excluded: a graph captured under one autocast state would be
+        replayed with that state baked in regardless of the caller's autocast context, which
+        could silently return outputs for the wrong precision. Under autocast we fall back to
+        eager (cache-aware streaming models run in float32 anyway).
+        """
         return (
             self.cuda_graphs_mode is self.CudaGraphsMode.FULL_GRAPH
             and not self.encoder.training
@@ -157,6 +163,7 @@ class CudaGraphsStreamingEncoderStep(WithOptionalCudaGraphs):
             and cache_last_channel is not None
             and not keep_all_outputs
             and not bypass_pre_encode
+            and not torch.is_autocast_enabled("cuda")
             and not torch.cuda.is_current_stream_capturing()
         )
 
