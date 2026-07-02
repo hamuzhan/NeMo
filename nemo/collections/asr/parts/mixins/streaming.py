@@ -51,7 +51,7 @@ class StreamingEncoder(ABC):
         :class:`torch.cuda.CUDAGraph` and replayed with a single kernel launch, removing the
         per-step host launch overhead of the eager encoder. Non-uniform steps (first step,
         final step with ``keep_all_outputs=True``) automatically run eager, and outputs are
-        bit-exact with eager execution. See
+        identical to eager execution (a replay runs the same kernels over the same memory). See
         :class:`~nemo.collections.asr.parts.submodules.streaming_encoder_cuda_graphs.CudaGraphsStreamingEncoderStep`.
 
         Args:

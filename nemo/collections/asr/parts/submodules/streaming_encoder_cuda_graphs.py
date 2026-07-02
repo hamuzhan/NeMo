@@ -68,7 +68,8 @@ class CudaGraphsStreamingEncoderStep(WithOptionalCudaGraphs):
     ``cudaGraphLaunch`` instead of ~10^3 individual kernel launches.
 
     Guarantees:
-        * bit-exact outputs vs. eager execution (same kernels, same order, static shapes);
+        * outputs identical to eager execution: a replay runs the same kernels, in the same order,
+          over the same memory, so it is not an approximation (no numerical tolerance involved);
         * safe interop with the decoder's CUDA graphs (outputs live outside the graph pool);
         * automatic eager fallback for non-uniform steps and on any capture failure
           (unless a mode is forced via :meth:`force_cuda_graphs_mode`).
