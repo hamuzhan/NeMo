@@ -106,6 +106,29 @@ class TestStreamingEncoderCudaGraphsGPU:
         assert_stream_outputs_equal(reference, graphed)
 
     @pytest.mark.unit
+    def test_input_and_output_cache_buffers_are_distinct(self):
+        """The captured step must read caches from the static input buffers and write the next
+        caches into separate stable output buffers. If they aliased, a replay would overwrite its
+        own inputs. Also checks a multi-step replay keeps the cache flow consistent (no crash)."""
+        device = "cuda"
+        encoder = make_encoder(device)
+        helper = encoder.set_streaming_cuda_graphs(enabled=True, warmup_steps=2)
+        try:
+            chunks = steady_chunks(encoder, 2, num_steps=8, device=device)
+            run_stream(encoder, chunks, 2, device, keep_all_last=False)
+            assert len(helper._graphs) >= 1
+            captured = next(iter(helper._graphs.values()))
+            in_clc = captured.static_inputs["cache_last_channel"].data_ptr()
+            in_clt = captured.static_inputs["cache_last_time"].data_ptr()
+            # output tuple: (encoded, encoded_len, cache_last_channel_next, cache_last_time_next, len)
+            out_clc = captured.stable_outputs[2].data_ptr()
+            out_clt = captured.stable_outputs[3].data_ptr()
+            assert in_clc != out_clc, "input/output cache_last_channel buffers alias"
+            assert in_clt != out_clt, "input/output cache_last_time buffers alias"
+        finally:
+            encoder.set_streaming_cuda_graphs(enabled=False)
+
+    @pytest.mark.unit
     def test_att_context_switch_uses_new_graph(self):
         """Changing the att context must not reuse a stale graph (key includes the context)."""
         device = "cuda"
@@ -149,10 +172,10 @@ class TestStreamingEncoderCudaGraphsGPU:
             encoder.set_streaming_cuda_graphs(enabled=False)
 
     @pytest.mark.unit
-    def test_autocast_runs_eager(self):
+    def test_autocast_does_not_replay_non_autocast_graph(self):
         """Under an active autocast context the graph path must be skipped: a graph captured
         under one autocast state would replay it regardless of the caller's state, which could
-        silently return outputs for the wrong precision."""
+        silently return outputs for the wrong precision (fp32 where the caller expects bf16)."""
         device = "cuda"
         encoder = make_encoder(device)
         helper = encoder.set_streaming_cuda_graphs(enabled=True, warmup_steps=1)
@@ -161,6 +184,25 @@ class TestStreamingEncoderCudaGraphsGPU:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 run_stream(encoder, chunks, 2, device, keep_all_last=False)
             assert len(helper._graphs) == 0, "graph captured/used under autocast"
+        finally:
+            encoder.set_streaming_cuda_graphs(enabled=False)
+
+    @pytest.mark.unit
+    def test_max_graphs_limit(self):
+        """Once max_graphs distinct keys are captured, further keys stay eager (no unbounded
+        capture)."""
+        device = "cuda"
+        batch_size = 2
+        encoder = make_encoder(device)
+        helper = encoder.set_streaming_cuda_graphs(enabled=True, warmup_steps=1, max_graphs=1)
+        try:
+            run_stream(encoder, steady_chunks(encoder, batch_size, 4, device), batch_size, device)
+            assert len(helper._graphs) == 1
+
+            encoder.set_default_att_context_size([8, 0])
+            encoder.setup_streaming_params()
+            run_stream(encoder, steady_chunks(encoder, batch_size, 4, device), batch_size, device)
+            assert len(helper._graphs) == 1, "captured more graphs than max_graphs"
         finally:
             encoder.set_streaming_cuda_graphs(enabled=False)
 
@@ -248,6 +290,35 @@ class TestStreamingEncoderCudaGraphsCPU:
         assert encoder._stream_step_cuda_graphs is not None
         encoder.set_streaming_cuda_graphs(enabled=False)
         assert encoder._stream_step_cuda_graphs is None
+
+    @pytest.mark.unit
+    def test_asr_model_hooks_toggle_encoder_graphs(self, monkeypatch):
+        """`ASRModel.disable_cuda_graphs()` / `maybe_enable_cuda_graphs()` must also toggle the
+        encoder streaming graphs, so the train/val Lightning hooks manage them like the decoder
+        graphs. Uses the real ASRModel methods on a minimal container (no model download)."""
+        from nemo.collections.asr.models.asr_model import ASRModel
+
+        class _Container:
+            maybe_enable_cuda_graphs = ASRModel.maybe_enable_cuda_graphs
+            disable_cuda_graphs = ASRModel.disable_cuda_graphs
+
+            def __init__(self, encoder):
+                self.encoder = encoder
+                self.decoding = None  # no decoder in this minimal container
+
+        # pretend CUDA is available so the helper can enter FULL_GRAPH mode on CPU
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        encoder = make_encoder("cpu")
+        helper = encoder.set_streaming_cuda_graphs(enabled=True)
+        container = _Container(encoder)
+        try:
+            assert helper.cuda_graphs_mode is helper.CudaGraphsMode.FULL_GRAPH
+            assert container.disable_cuda_graphs() is True  # on_train_epoch_start path
+            assert helper.cuda_graphs_mode is None
+            assert container.maybe_enable_cuda_graphs() is True  # on_train_epoch_end path
+            assert helper.cuda_graphs_mode is helper.CudaGraphsMode.FULL_GRAPH
+        finally:
+            encoder.set_streaming_cuda_graphs(enabled=False)
 
     @pytest.mark.unit
     def test_warmup_steps_validation(self):
