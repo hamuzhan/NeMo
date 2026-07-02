@@ -130,7 +130,8 @@ class CacheAwareASRInferenceWrapper(ASRInferenceWrapper):
         """
         Enable or disable CUDA-graph replay for the encoder streaming step (inference only).
         Steady-state chunks are captured once into a CUDA graph and replayed with a single
-        kernel launch; outputs are bit-exact with eager execution. See
+        kernel launch; outputs are identical to eager execution and non-steady-state steps
+        (including under CUDA autocast) fall back to eager. See
         :class:`~nemo.collections.asr.parts.submodules.streaming_encoder_cuda_graphs.CudaGraphsStreamingEncoderStep`.
         Args:
             enabled: (bool) whether to enable CUDA graphs for the encoder streaming step.

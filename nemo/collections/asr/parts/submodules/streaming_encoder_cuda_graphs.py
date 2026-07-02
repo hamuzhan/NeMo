@@ -44,6 +44,19 @@ from nemo.utils.enum import PrettyStrEnum
 __all__ = ["CudaGraphsStreamingEncoderStep"]
 
 
+def _cuda_autocast_enabled() -> bool:
+    """Return whether CUDA autocast is active, tolerant of the PyTorch version.
+
+    ``torch.is_autocast_enabled`` gained a device-type argument in newer PyTorch; on older
+    versions it takes no argument and reports the CUDA autocast state. We try the device-specific
+    call first and fall back to the no-argument form.
+    """
+    try:
+        return torch.is_autocast_enabled("cuda")
+    except TypeError:
+        return torch.is_autocast_enabled()
+
+
 class _CapturedStep:
     """A captured CUDA graph with its static input and stable output buffers."""
 
@@ -151,10 +164,10 @@ class CudaGraphsStreamingEncoderStep(WithOptionalCudaGraphs):
     def _can_use_graphs(self, signal, cache_last_channel, keep_all_outputs, bypass_pre_encode) -> bool:
         """Static-shape, inference-only, cached streaming steps qualify for capture/replay.
 
-        Autocast is intentionally excluded: a graph captured under one autocast state would be
-        replayed with that state baked in regardless of the caller's autocast context, which
-        could silently return outputs for the wrong precision. Under autocast we fall back to
-        eager (cache-aware streaming models run in float32 anyway).
+        CUDA autocast intentionally uses eager execution for correctness. A captured graph
+        preserves the dtype/kernel/workspace decisions made at capture time, so replaying a
+        non-autocast graph under autocast (or vice versa) can silently violate the caller's
+        expected autocast semantics. Cache-aware streaming models run in float32 anyway.
         """
         return (
             self.cuda_graphs_mode is self.CudaGraphsMode.FULL_GRAPH
@@ -163,7 +176,7 @@ class CudaGraphsStreamingEncoderStep(WithOptionalCudaGraphs):
             and cache_last_channel is not None
             and not keep_all_outputs
             and not bypass_pre_encode
-            and not torch.is_autocast_enabled("cuda")
+            and not _cuda_autocast_enabled()
             and not torch.cuda.is_current_stream_capturing()
         )
 
